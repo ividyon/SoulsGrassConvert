@@ -69,7 +69,7 @@ class Program
             var grass = GRASS.Read(filePath);
 
             PromptPlus.WriteLine($"Converting GRASS to GLTF...");
-            var gltf = SharpGLTF.Schema2.ModelRoot.CreateModel();
+            var gltf = ModelRoot.CreateModel();
             var scene = gltf.DefaultScene = gltf.UseScene($"{filename}_scene");
             var node = scene.CreateNode($"{filename}_node");
             var mesh = node.Mesh = gltf.CreateMesh($"{filename}_mesh");
@@ -87,18 +87,18 @@ class Program
             for (int i = 0; i < 6; i++)
             {
                 prim.WithVertexAccessor($"COLOR_{i}",
-                    grass.Vertices.Select(a => new Vector3(a.GrassDensities[i], a.GrassDensities[i], a.GrassDensities[i]))
+                    grass.Vertices.Select(a => new Vector4(a.GrassDensities[i], a.GrassDensities[i], a.GrassDensities[i], 1))
                         .ToArray());
             }
 
-            var gltfPath = Path.Combine(Path.GetDirectoryName(filePath)!, $"{Path.GetFileNameWithoutExtension(filePath)}.gltf");
-            if (File.Exists(gltfPath))
+            var glbPath = Path.Combine(Path.GetDirectoryName(filePath)!, $"{Path.GetFileNameWithoutExtension(filePath)}.glb");
+            if (File.Exists(glbPath))
             {
-                PromptPlus.WriteLine($"Backing up existing file at {gltfPath}...");
-                File.Copy(gltfPath, $"{gltfPath}.bak", true);
+                PromptPlus.WriteLine($"Backing up existing file at {glbPath}...");
+                File.Copy(glbPath, $"{glbPath}.bak", true);
             }
-            PromptPlus.WriteLine($"Writing GLTF to {gltfPath}...");
-            gltf.SaveGLTF(gltfPath);
+            PromptPlus.WriteLine($"Writing GLB to {glbPath}...");
+            gltf.SaveGLB(glbPath);
 
             var boundingPath = Path.Combine(Path.GetDirectoryName(filePath)!, $"{Path.GetFileNameWithoutExtension(filePath)}.json");
             if (File.Exists(boundingPath))
@@ -111,16 +111,15 @@ class Program
             File.WriteAllText(boundingPath, boundingVolumes);
 
             if (automatic)
-                PromptPlus.WriteLine($"Wrote GLTF to {gltfPath}.");
+                PromptPlus.WriteLine($"Wrote GLB to {glbPath}.");
             else
-                PromptPlus.KeyPress($"Wrote GLTF to {gltfPath}. Press any key to exit...").Run();
+                PromptPlus.KeyPress($"Wrote GLB to {glbPath}. Press any key to exit...").Run();
             return;
         }
-        else if (ext == ".gltf")
+        else if (ext == ".gltf" || ext == ".glb")
         {
             PromptPlus.WriteLine($"Reading GLTF file at {filePath}...");
             var loaded = SharpGLTF.Schema2.ModelRoot.Load(filePath)!;
-
             var boundingPath = Path.Combine(Path.GetDirectoryName(filePath)!,
                 $"{Path.GetFileNameWithoutExtension(filePath)}.json");
             if (!File.Exists(boundingPath))
@@ -142,10 +141,7 @@ class Program
                     PromptPlus.KeyPress($"Invalid bounding box data provided. Press any key to exit...").Run();
                 return;
             }
-
-            var loadedScene = loaded.DefaultScene;
-            var loadedNode = loadedScene.FindNode(n => true);
-            var loadedMesh = loadedNode.Mesh;
+            var loadedMesh = loaded.LogicalMeshes.First();
             var loadedPrim = loadedMesh.Primitives.First();
             var vertexPos = loadedPrim.GetVertexAccessor("POSITION").AsVector3Array().ToArray();
             var faceIndices = loadedPrim.GetIndexAccessor().AsIndicesArray().ToArray();
@@ -162,7 +158,7 @@ class Program
             var newGrass = new GRASS();
             for (int j = 0; j < 6; j++)
             {
-                var color = loadedPrim.GetVertexAccessor($"COLOR_{j}").AsVector3Array().ToArray();
+                var color = loadedPrim.GetVertexAccessor($"COLOR_{j}").AsVector4Array().ToArray();
                 for (int i = 0; i < vertices.Count; i++)
                 {
                     var vertex = vertices[i];
@@ -170,9 +166,50 @@ class Program
                 }
             }
 
-            newGrass.Vertices = vertices;
+            // Merge vertices
+            var samePosGroups = vertices.GroupBy(v => v.Position).ToList();
+            var newVertices = samePosGroups.Select(g => g.First()).ToList();
+            foreach (GRASS.Face face in faces)
+            {
+                var aVertex = vertices[face.VertexIndexA];
+                var aGroup = samePosGroups.First(a => a.Contains(aVertex));
+                var aFirstIdx = newVertices.IndexOf(aGroup.First());
+                face.VertexIndexA = aFirstIdx;
+
+                var bVertex = vertices[face.VertexIndexB];
+                var bGroup = samePosGroups.First(a => a.Contains(bVertex));
+                var bFirstIdx = newVertices.IndexOf(bGroup.First());
+                face.VertexIndexB = bFirstIdx;
+
+                var cVertex = vertices[face.VertexIndexC];
+                var cGroup = samePosGroups.First(a => a.Contains(cVertex));
+                var cFirstIdx = newVertices.IndexOf(cGroup.First());
+                face.VertexIndexC = cFirstIdx;
+            }
+
+            newGrass.Vertices = newVertices;
             newGrass.Faces = faces;
             newGrass.BoundingVolumeHierarchy = bounding;
+            newGrass.BoundingVolumeHierarchy = new();
+            newGrass.BoundingVolumeHierarchy.Add(new GRASS.Volume()
+            {
+                BoundingBox = new GRASS.BoundingBox() { Min = new()
+                {
+                    X = newVertices.Min(v => v.Position.X),
+                    Y = newVertices.Min(v => v.Position.Y),
+                    Z = newVertices.Min(v => v.Position.Z)
+                }, Max = new()
+                {
+                    X = newVertices.Max(v => v.Position.X),
+                    Y = newVertices.Max(v => v.Position.Y),
+                    Z = newVertices.Max(v => v.Position.Z)
+                } },
+                Unk10 = 31,
+                StartChildIndex = 0,
+                EndChildIndex = 0,
+                StartFaceIndex = 0,
+                EndFaceIndex = faces.Count
+            });
 
             var grassPath = Path.Combine(Path.GetDirectoryName(filePath)!, $"{Path.GetFileNameWithoutExtension(filePath)}.grass");
             if (File.Exists(grassPath))
